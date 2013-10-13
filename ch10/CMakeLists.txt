@@ -9,3 +9,6 @@ target_link_libraries(sleep2 libapue)
 
 add_executable(read read.cc)
 target_link_libraries(read libapue)
+
+add_executable(critical critical.cc)
+target_link_libraries(critical libapue)
