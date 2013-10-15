@@ -10,7 +10,7 @@ foo *foo_alloc(void)
 {
     foo *fp;
 
-    if ((fp == malloc(sizeof(foo))) != NULL) {
+    if ((fp = (foo *)malloc(sizeof(foo))) != NULL) {
         fp->f_count = 1;
         if (pthread_mutex_init(&fp->f_lock, NULL) != 0) {
             free(fp);
