@@ -7,3 +7,6 @@ install(TARGETS libmutex DESTINATION ch11)
 
 add_library(libhash hash.cc)
 install(TARGETS libhash DESTINATION ch11)
+
+add_library(libqueue queue.cc)
+install(TARGETS libqueue DESTINATION ch11)
