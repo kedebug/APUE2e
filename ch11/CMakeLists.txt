@@ -10,3 +10,6 @@ install(TARGETS libhash DESTINATION ch11)
 
 add_library(libqueue queue.cc)
 install(TARGETS libqueue DESTINATION ch11)
+
+add_library(libcondition condition.cc)
+install(TARGETS libcondition DESTINATION ch11)
