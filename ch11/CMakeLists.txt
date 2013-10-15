@@ -9,5 +9,5 @@ set(libch11
 )
 
 add_library(ch11 ${libch11})
-target_link_libraries(libapue)
+target_link_libraries(ch11 libapue)
 install(TARGETS ch11 DESTINATION ch11)
