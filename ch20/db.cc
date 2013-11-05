@@ -172,4 +172,104 @@ char* db_fetch(DBHANDLE h, const char* key) {
 
     if (un_lock(db->idxfd, db->chainoff, SEEK_SET, 1) < 0)
         err_dump("db_fetch: unlock error");
+
+    return ptr;
+}
+
+static int _db_find_and_lock(DB* db, const char* key, int writelock) {
+    db->chainoff = (_db_hash(db, key) * PTR_SIZE) + db->hashoff; 
+    db->ptroff   = db->chainoff;
+
+    if (writelock) {
+        if (writew_lock(db->idxfd, db->chainoff, SEEK_SET, 1) < 0)
+            err_dump("_db_find_and_lock: writew_lock failed");
+    } else {
+        if (readw_lock(db->idxfd, db->chainoff, SEEK_SET, 1) < 0)
+            err_dump("_db_find_and_lock: readw_lock failed");
+    }
+
+    off_t offset, nextoff;
+    offset = _db_readptr(db, db->ptroff);
+    while (offset != 0) {
+        nextoff = _db_readidx(db, offset);
+        if (strcmp(db->idxbuf, key) == 0)
+            break;
+        db->ptroff = offset;
+        offset = nextoff;
+    }
+
+    return offset == 0 ? -1 : 0;
+}
+
+static DBHASH _db_hash(DB* db, const char* key) {
+    DBHASH  hval = 0;
+    char    c;
+
+    for (size_t i = 1; (c = *key++) != 0; i++)
+        hval += c * i;
+
+    return (hval % NHASH_DEF);
+}
+
+static off_t _db_readptr(DB* db, off_t offset) {
+    char asci[PTR_SIZE + 1];
+
+    if (lseek(db->idxfd, offset, SEEK_SET) == -1)
+        err_dump("_db_readptr: lseek error");
+    if (read(db->idxfd, asci, PTR_SIZE) != PTR_SIZE)
+        err_dump("_db_readptr: read error");
+
+    asci[PTR_SIZE] = 0;
+    return atol(asci);
+}
+
+static off_t _db_readidx(DB* db, off_t offset) {
+    char asciiptr[PTR_SIZE + 1], asciilen[IDXLEN_SIZE + 1];
+    
+    if ((db->idxoff = lseek(db->idxfd, offset, 
+              offset == 0 ? SEEK_CUR : SEEK_SET)) == -1)
+        err_dump("_db_readidx: lseek error");
+
+    struct iovec iov[2];
+    iov[0].iov_base = asciiptr;
+    iov[0].iov_len  = PTR_SIZE;
+    iov[1].iov_base = asciilen;
+    iov[1].iov_len  = IDXLEN_SIZE;
+
+    ssize_t readlen = readv(db->idxfd, &iov[0], 2);
+    if (readlen != PTR_SIZE + IDXLEN_SIZE) {
+        if (readlen == 0 && offset == 0)
+            return -1;
+        err_dump("_db_readidx: readv error");
+    }
+
+    asciiptr[PTR_SIZE] = 0;
+    db->ptrval = atol(asciiptr);
+
+    asciilen[IDXLEN_SIZE] = 0;
+    db->idxlen = atoi(asciilen);
+    if (db->idxlen < IDXLEN_MIN || db->idxlen > IDXLEN_MAX)
+        err_dump("_db_readidx: invalid length");
+
+    readlen = read(db->idxfd, db->idxbuf, db->idxlen);
+    if (readlen != db->idxlen)
+        err_dump("_db_readidx: read idxbuf error");
+    if (db->idxbuf[readlen-1] != NEWLINE)
+        err_dump("_db_readidx: missing newline");
+    db->idxbuf[readlen-1] = 0;
+
+    char* ptr1, * ptr2;
+    if ((ptr1 = strchr(db->idxbuf, SEP)) == NULL)
+        err_dump("_db_readidx: missing first seqarator");
+    *ptr1++ = 0;
+    if ((ptr2 = strchr(ptr1, SEP)) == NULL)
+        err_dump("_db_readidx: missing second seqarator");
+    *ptr2++ = 0;
+
+    if ((db->datoff = atol(ptr1)) < 0)
+        err_dump("_db_readidx: data offset < 0");
+    if ((db->datlen = atol(ptr2)) <= 0 || db->datlen > DATLEN_MAX)
+        err_dump("_db_readidx: invalid data length");
+
+    return db->ptrval;
 }
