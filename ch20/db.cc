@@ -57,6 +57,9 @@ static DBHASH   _db_hash(DB*, const char*);
 static char*    _db_readdat(DB*);
 static char*    _db_readidx(DB*, off_t);
 static char*    _db_readptr(DB*, off_t);
+static void     _db_writedat(DB*, const char*, off_t, int);
+static void     _db_writeidx(DB*, const char*, off_t, int, off_t);
+static void     _db_writeptr(DB*, off_t, off_t);
 
 DBHANDLE db_open(const char* pathname, int oflag, ...) {
     DB* db;
@@ -104,8 +107,9 @@ DBHANDLE db_open(const char* pathname, int oflag, ...) {
 
         if (statbuf.st_size == 0) {
             sprintf(asci, "%*d", PTR_SIZE, 0);
+            size_t i;
             hash[0] = 0;
-            for (size_t i = 0; i < NHASH_DEF + 1; i++)
+            for (i = 0; i < NHASH_DEF + 1; i++)
                 strcat(hash, asci);
             strcat(hash, '\n');
             i = strlen(hash);
@@ -272,4 +276,116 @@ static off_t _db_readidx(DB* db, off_t offset) {
         err_dump("_db_readidx: invalid data length");
 
     return db->ptrval;
+}
+
+static char* _db_readdat(DB* db) {
+    if (lseek(db->datfd, db->datoff, SEEK_SET) == -1)
+        err_dump("_db_readdat: lseek error");
+    if (read(db->datfd, db->datbuf, db->datlen) != db->datlen)
+        err_dump("_db_readdat: read error");
+    if (db->datbuf[db->datlen-1] != NEWLINE)
+        err_dump("_db_readdat: missing NEWLINE");
+
+    db->datbuf[db->datlen-1] = 0;
+    return db->datbuf;
+}
+
+int db_delete(DBHANDLE h, const char* key) {
+    DB* db = (DB*)h;
+    int ret = 0;
+
+    if (_db_find_and_lock(db, key, 1) == 0) {
+        _db_dodelete(db);
+        db->cnt_delok += 1;
+    } else {
+        ret = -1;
+        db->cnt_delerr += 1;
+    }
+    if (un_lock(db->idxfd, db->chainoff, SEEK_SET, 1) < 0)
+        err_dump("db_delete: un_lock error");
+
+    return ret;
+}
+
+static void _db_dodelete(DB* db) {
+
+}
+
+static void _db_writedat(DB* db, const char* data, off_t offset, int whence) {
+    if (whence == SEEK_END) {
+        if (writew_lock(db->datfd, 0, SEEK_SET, 0) < 0)
+            err_dump("_db_writedat: writew_lock error");
+    }
+    if ((db->datoff = lseek(db->datfd, offset, whence)) == -1)
+        err_dump("_db_writedat: lseek error");
+    db->datlen = strlen(data) + 1;
+
+    struct iovec iov[2];
+    static char  newline = NEWLINE;
+    iov[0].iov_base = data;
+    iov[0].iov_len  = db->datlen - 1;
+    iov[1].iov_base = &newline;
+    iov[1].iov_len  = 1;
+    if (writev(db->datfd, &iov[0], 2) != db->datlen)
+        err_dump("_db_writedat: writev error");
+
+    if (whence == SEEK_END) {
+        if (un_lock(db->datfd, 0, SEEK_SET, 0) < 0)
+            err_dump("_db_writedat: un_lock error");
+    }
+}
+
+static void _db_writeidx(DB* db, const char* key, 
+                         off_t offset, int whence, off_t ptrval) {
+    if ((db->ptrval = ptrval) < 0 || ptrval > PTR_MAX) {
+        err_quit("_db_writeidx: invalid ptr: %d", ptrval);
+    }
+    char* fmt;
+    if (sizeof(off_t) == sizeof(long long))
+        fmt = "%s%c%lld%c%d\n";
+    else 
+        fmt = "%s%c%ld%c%d\n";
+    sprintf(db->idxbuf, fmt, key, SEP, db->datoff, SEP, db->datlen);
+
+    size_t len = strlen(db->idxbuf);
+    if (len < IDXLEN_MIN || len > IDXLEN_MAX)
+        err_dump("_db_writeidx: invalid length");
+    
+    char asciiptrlen[PTR_SIZE + IDXLEN_SIZE + 1];
+    sprintf(asciiptrlen, "%*ld%*d", PTR_SIZE, ptrval, IDXLEN_SIZE, len);
+
+    if (whence == SEEK_END) {
+        if (writew_lock(db->idxfd, ((db->nhash+1)*PTR_SIZE) + 1, SEEK_SET, 0) < 0)
+            err_dump("_db_writeidx: writew_lock error");
+    }
+    
+    db->idxoff = lseek(db->idxfd, offset, whence);
+    if (db->idxoff == -1)
+        err_dump("_db_writeidx: lseek error");
+
+    struct iovec iov[2];
+    iov[0].iov_base = asciiptrlen;
+    iov[0].iov_len  = PTR_SIZE + IDXLEN_SIZE;
+    iov[1].iov_base = db->idxbuf;
+    iov[1].iov_len  = len;
+    if (writev(db->idxfd, &iov[0], 2) != PTR_SIZE + IDXLEN_SIZE + len)
+        err_dump("_db_writeidx: writev error");
+
+    if (whence == SEEK_END) {
+        if (un_lock(db->idxfd, ((db->nhash+1)*PTR_SIZE) + 1, SEEK_SET, 0) < 0)
+            err_dump("_db_writeidx: un_lock error");
+    }
+}
+
+static void _db_writeptr(DB* db, off_t offset, off_t ptrval) {
+    char asciiptr[PTR_SIZE + 1];
+
+    if (ptrval < 0 || ptrval > PTR_MAX)
+        err_quit("_db_writeptr: invalid ptr: %d", ptrval);
+
+    sprintf(asciiptr, "%*ld", PTR_SIZE, ptrval);
+    if (lseek(db->idxfd, offset, SEEK_SET) == -1)
+        err_dump("_db_writeptr: lseek error of ptr field");
+    if (write(db->idxfd, asciiptr, PTR_SIZE) != PTR_SIZE)
+        err_dump("_db_writeptr: write error");
 }
